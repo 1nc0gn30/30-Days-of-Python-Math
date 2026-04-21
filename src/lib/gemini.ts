@@ -1,8 +1,14 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type } from '@google/genai';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+function getClient(apiKey: string) {
+  const key = apiKey.trim();
+  if (!key) {
+    throw new Error('Missing Gemini API key');
+  }
+  return new GoogleGenAI({ apiKey: key });
+}
 
-export async function fetchDailyLesson(day: number, title: string, topic: string) {
+export async function fetchDailyLesson(day: number, title: string, topic: string, apiKey: string) {
   const prompt = `You are an expert Python and Math instructor. Write a comprehensive daily lesson for Day ${day} of a 30-day "Math with Python" course.
 Title: ${title}
 Topic: ${topic}
@@ -11,7 +17,7 @@ Requirements:
 1. Provide a detailed conceptual explanation of the math concept (approx 100-150 words). Break it down so it is easy to understand.
 2. Provide a brief Python code example (approx 5-10 lines).
 3. Provide 2-3 high-quality external resource links (e.g., Khan Academy, Python Documentation, or Wolfram Alpha) relevant to this specific topic.
-4. Provide a practical Coding Challenge for the user to solve right now. 
+4. Provide a practical Coding Challenge for the user to solve right now.
 
 Format the response strictly as a JSON object with the following schema:
 {
@@ -25,11 +31,12 @@ Format the response strictly as a JSON object with the following schema:
 Do NOT wrap the JSON in Markdown code blocks. Return raw JSON.`;
 
   try {
+    const ai = getClient(apiKey);
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -44,11 +51,11 @@ Do NOT wrap the JSON in Markdown code blocks. Return raw JSON.`;
                   title: { type: Type.STRING },
                   url: { type: Type.STRING }
                 },
-                required: ["title", "url"]
+                required: ['title', 'url']
               }
             }
           },
-          required: ["explanation", "codeExample", "challengeTask", "resources"]
+          required: ['explanation', 'codeExample', 'challengeTask', 'resources']
         }
       }
     });
@@ -56,12 +63,12 @@ Do NOT wrap the JSON in Markdown code blocks. Return raw JSON.`;
     const jsonStr = response.text.trim();
     return JSON.parse(jsonStr);
   } catch (err) {
-    console.error("Error fetching lesson:", err);
+    console.error('Error fetching lesson:', err);
     return null;
   }
 }
 
-export async function evaluateUserCode(day: number, topic: string, challenge: string, code: string) {
+export async function evaluateUserCode(day: number, topic: string, challenge: string, code: string, apiKey: string) {
   const prompt = `You are evaluating a student's Python code for Day ${day} of a math course.
 Topic: ${topic}
 Task: ${challenge}
@@ -77,26 +84,27 @@ Format strictly as JSON:
 }`;
 
   try {
+    const ai = getClient(apiKey);
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             passed: { type: Type.BOOLEAN },
             feedback: { type: Type.STRING }
           },
-          required: ["passed", "feedback"]
+          required: ['passed', 'feedback']
         }
       }
     });
-    
+
     const jsonStr = response.text.trim();
     return JSON.parse(jsonStr);
   } catch (err) {
-    console.error("Error evaluating code:", err);
-    return { passed: false, feedback: "An error occurred while evaluating. Please try again." };
+    console.error('Error evaluating code:', err);
+    return { passed: false, feedback: 'An error occurred while evaluating. Please try again.' };
   }
 }

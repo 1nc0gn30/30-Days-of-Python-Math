@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { curriculum } from './data/curriculum';
 import { fetchDailyLesson, evaluateUserCode } from './lib/gemini';
 import { CodeEditor } from './components/CodeEditor';
-import { CheckCircle2, Circle, Play, Loader2, BookOpen, AlertCircle, Menu, X, ExternalLink } from 'lucide-react';
+import { CheckCircle2, Circle, Play, Loader2, BookOpen, AlertCircle, Menu, X, ExternalLink, Settings } from 'lucide-react';
 
 interface LessonData {
   explanation: string;
@@ -12,23 +12,69 @@ interface LessonData {
   resources: { title: string; url: string }[];
 }
 
+interface AppSettings {
+  aiEnabled: boolean;
+  apiKey: string;
+}
+
+const SETTINGS_STORAGE_KEY = 'pythonMathSettings';
+
+function buildFallbackLesson(day: number, title: string, topic: string): LessonData {
+  return {
+    explanation: `This lesson is running in local mode without AI. Focus topic for Day ${day}: ${topic}`,
+    codeExample: [
+      '# Starter example',
+      `print('Day ${day}: ${title}')`,
+      '# Build from here based on the challenge task',
+    ].join('\n'),
+    challengeTask: `Write a Python solution for Day ${day} (${title}) based on: ${topic}`,
+    resources: [
+      { title: 'Python Official Docs', url: 'https://docs.python.org/3/' },
+      { title: 'Khan Academy Math', url: 'https://www.khanacademy.org/math' },
+      { title: 'Wolfram MathWorld', url: 'https://mathworld.wolfram.com/' }
+    ]
+  };
+}
+
 export default function App() {
   const [selectedDay, setSelectedDay] = useState(1);
   const [completedDays, setCompletedDays] = useState<number[]>([]);
   const [lessonData, setLessonData] = useState<LessonData | null>(null);
   const [loading, setLoading] = useState(false);
-  const [userCode, setUserCode] = useState("");
+  const [userCode, setUserCode] = useState('');
   const [evaluating, setEvaluating] = useState(false);
   const [feedback, setFeedback] = useState<{ passed: boolean; message: string } | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState<AppSettings>({ aiEnabled: false, apiKey: '' });
 
-  // Load completed days from local storage
+  const aiReady = settings.aiEnabled && settings.apiKey.trim().length > 0;
+
+  // Load completed days and local settings
   useEffect(() => {
-    const saved = localStorage.getItem('completedMathDays');
-    if (saved) {
-      setCompletedDays(JSON.parse(saved));
+    const savedCompleted = localStorage.getItem('completedMathDays');
+    if (savedCompleted) {
+      setCompletedDays(JSON.parse(savedCompleted));
+    }
+
+    const savedSettings = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (savedSettings) {
+      try {
+        const parsed = JSON.parse(savedSettings) as Partial<AppSettings>;
+        setSettings({
+          aiEnabled: Boolean(parsed.aiEnabled),
+          apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : ''
+        });
+      } catch {
+        // Ignore corrupted settings and keep defaults
+      }
     }
   }, []);
+
+  const updateSettings = (next: AppSettings) => {
+    setSettings(next);
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(next));
+  };
 
   const saveCompleted = (day: number) => {
     const next = [...new Set([...completedDays, day])];
@@ -41,35 +87,51 @@ export default function App() {
     setLessonData(null);
     setFeedback(null);
     setLoading(true);
-    setUserCode("# Write your python code here\n");
+    setUserCode('# Write your python code here\n');
     setIsSidebarOpen(false);
 
     const item = curriculum.find(d => d.day === dayInt);
-    if (item) {
-      const data = await fetchDailyLesson(item.day, item.title, item.topic);
-      setLessonData(data);
+    if (!item) {
+      setLoading(false);
+      return;
     }
+
+    if (aiReady) {
+      const data = await fetchDailyLesson(item.day, item.title, item.topic, settings.apiKey.trim());
+      setLessonData(data ?? buildFallbackLesson(item.day, item.title, item.topic));
+    } else {
+      setLessonData(buildFallbackLesson(item.day, item.title, item.topic));
+    }
+
     setLoading(false);
   };
 
   // Initial load
   useEffect(() => {
     loadLesson(1);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiReady]);
 
   const handleEvaluate = async () => {
     const item = curriculum.find(d => d.day === selectedDay);
-    if (!item || !lessonData) return;
-    
+    if (!item || !lessonData || !aiReady) return;
+
     setEvaluating(true);
     setFeedback(null);
-    
-    const result = await evaluateUserCode(item.day, item.topic, lessonData.challengeTask, userCode);
+
+    const result = await evaluateUserCode(
+      item.day,
+      item.topic,
+      lessonData.challengeTask,
+      userCode,
+      settings.apiKey.trim()
+    );
+
     setFeedback({
       passed: result.passed,
       message: result.feedback
     });
-    
+
     if (result.passed) {
       saveCompleted(item.day);
     }
@@ -81,7 +143,7 @@ export default function App() {
       {/* Mobile Header */}
       <header className="md:hidden flex items-center justify-between p-4 border-b border-white/10 bg-[#0A0A0A] z-50">
         <h1 className="text-lg font-medium tracking-tight text-white">30 Days of Python Math</h1>
-        <button 
+        <button
           onClick={() => setIsSidebarOpen(!isSidebarOpen)}
           className="p-2 hover:bg-white/5 rounded-lg"
         >
@@ -99,16 +161,60 @@ export default function App() {
           <div className="flex items-center space-x-2 text-xs font-mono text-white/50 uppercase tracking-wider">
             <span>Progress: {completedDays.length}/30</span>
             <div className="h-1 flex-1 bg-white/10 rounded-full overflow-hidden">
-              <div 
-                className="h-full bg-[#F27D26] transition-all duration-500 ease-out" 
+              <div
+                className="h-full bg-[#F27D26] transition-all duration-500 ease-out"
                 style={{ width: `${(completedDays.length / 30) * 100}%` }}
               />
             </div>
           </div>
         </div>
-        
+
         <div className="md:hidden p-6 border-b border-white/10">
-           <h2 className="text-sm font-mono uppercase tracking-widest text-[#F27D26] mb-4">Curriculum</h2>
+          <h2 className="text-sm font-mono uppercase tracking-widest text-[#F27D26] mb-4">Curriculum</h2>
+        </div>
+
+        <div className="p-4 border-b border-white/10">
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className="w-full flex items-center justify-between p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-sm text-white/90">
+              <Settings className="w-4 h-4" />
+              <span>Settings</span>
+            </div>
+            <span className={`text-xs font-mono uppercase ${aiReady ? 'text-green-400' : 'text-white/50'}`}>
+              {aiReady ? 'AI On' : 'AI Off'}
+            </span>
+          </button>
+
+          {showSettings && (
+            <div className="mt-3 p-3 rounded-lg bg-[#111111] border border-white/10 space-y-3">
+              <label className="flex items-center justify-between text-xs font-mono uppercase tracking-wide text-white/70">
+                <span>Use AI</span>
+                <input
+                  type="checkbox"
+                  checked={settings.aiEnabled}
+                  onChange={(e) => updateSettings({ ...settings, aiEnabled: e.target.checked })}
+                  className="accent-[#F27D26]"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-xs font-mono uppercase tracking-wide text-white/70">Gemini API Key</span>
+                <input
+                  type="password"
+                  value={settings.apiKey}
+                  placeholder="Paste key (stored locally in this browser)"
+                  onChange={(e) => updateSettings({ ...settings, apiKey: e.target.value })}
+                  className="mt-2 w-full rounded-md bg-black/40 border border-white/15 px-3 py-2 text-xs text-white placeholder:text-white/35 focus:outline-none focus:ring-1 focus:ring-[#F27D26]"
+                />
+              </label>
+
+              <p className="text-[11px] text-white/45 leading-relaxed">
+                AI features only run when enabled and a key is provided.
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-1">
@@ -162,10 +268,16 @@ export default function App() {
                 <div className="mb-2 text-xs font-mono uppercase tracking-widest text-[#F27D26]">
                   Day {selectedDay} • {curriculum.find(d => d.day === selectedDay)?.title}
                 </div>
-                
+
                 <h2 className="text-2xl md:text-3xl font-medium tracking-tight text-white mb-6">
                   {curriculum.find(d => d.day === selectedDay)?.topic}
                 </h2>
+
+                {!aiReady && (
+                  <div className="mb-6 p-4 rounded-lg border border-yellow-500/30 bg-yellow-500/10 text-yellow-200 text-sm">
+                    AI is currently disabled. Open Settings to enable AI and add your API key.
+                  </div>
+                )}
 
                 <div className="flex flex-col lg:grid lg:grid-cols-12 gap-8">
                   {/* Left: Explanation & Resources */}
@@ -176,7 +288,7 @@ export default function App() {
                         <h3 className="text-sm font-mono uppercase tracking-wider">Concept</h3>
                       </div>
                       <div className="text-white/70 leading-relaxed text-sm md:text-base prose prose-invert max-w-none">
-                         {lessonData.explanation}
+                        {lessonData.explanation}
                       </div>
                     </section>
 
@@ -184,10 +296,10 @@ export default function App() {
                       <h3 className="text-xs font-mono uppercase tracking-wider text-white/40 mb-4">Supplemental Resources</h3>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {lessonData.resources.map((res, i) => (
-                          <a 
-                            key={i} 
-                            href={res.url} 
-                            target="_blank" 
+                          <a
+                            key={i}
+                            href={res.url}
+                            target="_blank"
                             rel="noopener noreferrer"
                             className="flex items-center justify-between p-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 transition-colors group"
                           >
@@ -223,13 +335,14 @@ export default function App() {
                         <h3 className="text-xs font-mono uppercase tracking-wider text-white/50">Your Solution</h3>
                         <button
                           onClick={handleEvaluate}
-                          disabled={evaluating}
+                          disabled={evaluating || !aiReady}
                           className={`flex items-center space-x-2 px-4 py-2 rounded-full text-xs font-mono uppercase tracking-wide transition-all
-                            ${evaluating 
-                              ? 'bg-white/5 text-white/30 cursor-not-allowed' 
+                            ${evaluating || !aiReady
+                              ? 'bg-white/5 text-white/30 cursor-not-allowed'
                               : 'bg-[#F27D26] hover:bg-[#ff8a33] text-black hover:scale-105 active:scale-95'
                             }
                           `}
+                          title={aiReady ? 'Evaluate with AI' : 'Enable AI in Settings to evaluate'}
                         >
                           {evaluating ? (
                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -249,8 +362,8 @@ export default function App() {
                           initial={{ opacity: 0, scale: 0.95 }}
                           animate={{ opacity: 1, scale: 1 }}
                           className={`p-5 rounded-xl border flex items-start space-x-4
-                            ${feedback.passed 
-                              ? 'bg-green-500/10 border-green-500/30' 
+                            ${feedback.passed
+                              ? 'bg-green-500/10 border-green-500/30'
                               : 'bg-red-500/10 border-red-500/30'
                             }
                           `}
