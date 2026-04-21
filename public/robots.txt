@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://python-math.nealfrazier.tech/sitemap.xml

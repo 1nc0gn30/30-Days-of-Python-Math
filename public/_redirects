@@ -1,0 +1,6 @@
+/* Route everything to index.html for React Router / SPAs */
+/* Although we don't use React Router, it's good practice for SPA deployments */
+/* Netlify interprets this file at the root or public folder */
+/* The platform build system will handle the rest */
+/* Netlify Redirects */
+/* This is a comment, not actual redirects yet but prepared if needed */
