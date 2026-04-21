@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { curriculum } from './data/curriculum';
+import { getFallbackLesson } from './data/fallbackLessons';
 import { fetchDailyLesson, evaluateUserCode } from './lib/gemini';
 import { CodeEditor } from './components/CodeEditor';
-import { CheckCircle2, Circle, Play, Loader2, BookOpen, AlertCircle, Menu, X, ExternalLink, Settings } from 'lucide-react';
+import { CheckCircle2, Circle, Play, Loader2, BookOpen, AlertCircle, Menu, X, ExternalLink, Settings, Terminal } from 'lucide-react';
 
 interface LessonData {
   explanation: string;
@@ -17,24 +18,20 @@ interface AppSettings {
   apiKey: string;
 }
 
-const SETTINGS_STORAGE_KEY = 'pythonMathSettings';
-
-function buildFallbackLesson(day: number, title: string, topic: string): LessonData {
-  return {
-    explanation: `This lesson is running in local mode without AI. Focus topic for Day ${day}: ${topic}`,
-    codeExample: [
-      '# Starter example',
-      `print('Day ${day}: ${title}')`,
-      '# Build from here based on the challenge task',
-    ].join('\n'),
-    challengeTask: `Write a Python solution for Day ${day} (${title}) based on: ${topic}`,
-    resources: [
-      { title: 'Python Official Docs', url: 'https://docs.python.org/3/' },
-      { title: 'Khan Academy Math', url: 'https://www.khanacademy.org/math' },
-      { title: 'Wolfram MathWorld', url: 'https://mathworld.wolfram.com/' }
-    ]
+type PyodideLike = {
+  globals: {
+    set: (name: string, value: unknown) => void;
   };
+  runPythonAsync: (code: string) => Promise<unknown>;
+};
+
+declare global {
+  interface Window {
+    loadPyodide?: (opts?: { indexURL?: string }) => Promise<PyodideLike>;
+  }
 }
+
+const SETTINGS_STORAGE_KEY = 'pythonMathSettings';
 
 export default function App() {
   const [selectedDay, setSelectedDay] = useState(1);
@@ -47,6 +44,11 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({ aiEnabled: false, apiKey: '' });
+  const [pythonOutput, setPythonOutput] = useState('Python terminal ready. Click "Run Python".');
+  const [runningPython, setRunningPython] = useState(false);
+  const [pythonReady, setPythonReady] = useState(false);
+  const pyodideRef = useRef<PyodideLike | null>(null);
+  const pyodideInitRef = useRef<Promise<PyodideLike> | null>(null);
 
   const aiReady = settings.aiEnabled && settings.apiKey.trim().length > 0;
 
@@ -82,6 +84,75 @@ export default function App() {
     localStorage.setItem('completedMathDays', JSON.stringify(next));
   };
 
+  const getPyodide = async (): Promise<PyodideLike> => {
+    if (pyodideRef.current) {
+      return pyodideRef.current;
+    }
+
+    if (!pyodideInitRef.current) {
+      pyodideInitRef.current = (async () => {
+        if (!window.loadPyodide) {
+          await new Promise<void>((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/pyodide/v0.27.5/full/pyodide.js';
+            script.async = true;
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error('Failed to load Python runtime'));
+            document.head.appendChild(script);
+          });
+        }
+
+        if (!window.loadPyodide) {
+          throw new Error('Python runtime is unavailable');
+        }
+
+        const runtime = await window.loadPyodide({
+          indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.27.5/full/'
+        });
+
+        pyodideRef.current = runtime;
+        setPythonReady(true);
+        return runtime;
+      })();
+    }
+
+    return pyodideInitRef.current;
+  };
+
+  const runPython = async () => {
+    setRunningPython(true);
+    setPythonOutput('Running...');
+
+    try {
+      const pyodide = await getPyodide();
+      pyodide.globals.set('user_code', userCode);
+      const output = await pyodide.runPythonAsync(`
+import io
+import traceback
+import contextlib
+
+_stdout = io.StringIO()
+_stderr = io.StringIO()
+
+with contextlib.redirect_stdout(_stdout), contextlib.redirect_stderr(_stderr):
+    try:
+        exec(user_code, {})
+    except Exception:
+        traceback.print_exc()
+
+result = (_stdout.getvalue() + _stderr.getvalue()).strip()
+result if result else "Code ran successfully (no output)."
+      `);
+
+      setPythonOutput(String(output));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown Python runtime error';
+      setPythonOutput(`Runtime error: ${message}`);
+    } finally {
+      setRunningPython(false);
+    }
+  };
+
   const loadLesson = async (dayInt: number) => {
     setSelectedDay(dayInt);
     setLessonData(null);
@@ -98,9 +169,13 @@ export default function App() {
 
     if (aiReady) {
       const data = await fetchDailyLesson(item.day, item.title, item.topic, settings.apiKey.trim());
-      setLessonData(data ?? buildFallbackLesson(item.day, item.title, item.topic));
+      const nextLesson = data ?? getFallbackLesson(item.day, item.title, item.topic);
+      setLessonData(nextLesson);
+      setUserCode(nextLesson.codeExample || '# Write your python code here\n');
     } else {
-      setLessonData(buildFallbackLesson(item.day, item.title, item.topic));
+      const nextLesson = getFallbackLesson(item.day, item.title, item.topic);
+      setLessonData(nextLesson);
+      setUserCode(nextLesson.codeExample || '# Write your python code here\n');
     }
 
     setLoading(false);
@@ -333,29 +408,70 @@ export default function App() {
                     <div className="flex flex-col space-y-4">
                       <div className="flex items-center justify-between">
                         <h3 className="text-xs font-mono uppercase tracking-wider text-white/50">Your Solution</h3>
-                        <button
-                          onClick={handleEvaluate}
-                          disabled={evaluating || !aiReady}
-                          className={`flex items-center space-x-2 px-4 py-2 rounded-full text-xs font-mono uppercase tracking-wide transition-all
-                            ${evaluating || !aiReady
-                              ? 'bg-white/5 text-white/30 cursor-not-allowed'
-                              : 'bg-[#F27D26] hover:bg-[#ff8a33] text-black hover:scale-105 active:scale-95'
-                            }
-                          `}
-                          title={aiReady ? 'Evaluate with AI' : 'Enable AI in Settings to evaluate'}
-                        >
-                          {evaluating ? (
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <Play className="w-3 h-3" />
-                          )}
-                          <span>{evaluating ? 'Evaluating...' : 'Check'}</span>
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={runPython}
+                            disabled={runningPython}
+                            className={`flex items-center space-x-2 px-4 py-2 rounded-full text-xs font-mono uppercase tracking-wide transition-all
+                              ${runningPython
+                                ? 'bg-white/5 text-white/30 cursor-not-allowed'
+                                : 'bg-white/10 hover:bg-white/20 text-white'
+                              }
+                            `}
+                            title="Run in local Python terminal"
+                          >
+                            {runningPython ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Terminal className="w-3 h-3" />
+                            )}
+                            <span>{runningPython ? 'Running...' : 'Run Python'}</span>
+                          </button>
+
+                          <button
+                            onClick={handleEvaluate}
+                            disabled={evaluating || !aiReady}
+                            className={`flex items-center space-x-2 px-4 py-2 rounded-full text-xs font-mono uppercase tracking-wide transition-all
+                              ${evaluating || !aiReady
+                                ? 'bg-white/5 text-white/30 cursor-not-allowed'
+                                : 'bg-[#F27D26] hover:bg-[#ff8a33] text-black hover:scale-105 active:scale-95'
+                              }
+                            `}
+                            title={aiReady ? 'Evaluate with AI' : 'Enable AI in Settings to evaluate'}
+                          >
+                            {evaluating ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Play className="w-3 h-3" />
+                            )}
+                            <span>{evaluating ? 'Evaluating...' : 'Check'}</span>
+                          </button>
+                        </div>
                       </div>
 
                       <div className="min-h-[250px] md:min-h-[350px]">
                         <CodeEditor code={userCode} onChange={setUserCode} />
                       </div>
+
+                      <section className="bg-[#0F0F0F] p-4 rounded-xl border border-white/10">
+                        <div className="flex items-center justify-between mb-3">
+                          <h4 className="text-xs font-mono uppercase tracking-wider text-white/60">Python Terminal</h4>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[10px] font-mono uppercase ${pythonReady ? 'text-green-400' : 'text-white/50'}`}>
+                              {pythonReady ? 'Runtime Ready' : 'Lazy Loaded'}
+                            </span>
+                            <button
+                              onClick={() => setPythonOutput('')}
+                              className="text-[10px] font-mono uppercase tracking-wide px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white/80"
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        </div>
+                        <pre className="rounded-lg bg-black/40 border border-white/10 p-3 text-xs text-[#A9B7C6] whitespace-pre-wrap break-words min-h-[120px] max-h-[260px] overflow-auto">
+                          {pythonOutput}
+                        </pre>
+                      </section>
 
                       {feedback && (
                         <motion.div
