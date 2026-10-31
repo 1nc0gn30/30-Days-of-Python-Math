@@ -3,8 +3,8 @@
 A 30-day curriculum that teaches practical mathematics through Python-based exercises.
 
 ## Snapshot
-- Canonical URL: `https://python-math.nealfrazier.tech/`
-- Author: `Neal Frazier`
+- Canonical URL: `https://python-math.nullai.tech/`
+- Author: `1nc0gn30`
 - Stack: `React 19 + TypeScript + Vite 6 + Tailwind CSS 4`
 - Deployment target: `Netlify`
 
@@ -48,7 +48,7 @@ npm run preview
 - SPA fallback behavior is configured for Netlify deployment
 
 ## SEO Baseline
-- Canonical and social URLs point to: `https://python-math.nealfrazier.tech/`
+- Canonical and social URLs point to: `https://python-math.nullai.tech/`
 - `robots.txt` and `sitemap.xml` are aligned to the canonical host
 
 ## Project Layout
