@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="30 Days of Python Math logo">
+  <rect width="64" height="64" rx="14" fill="#07090D"/>
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="none" stroke="#F27D26" stroke-opacity="0.45" stroke-width="2"/>
+  <path d="M20 18h26v6H29l11 8-11 8h17v6H20v-6l12-8-12-8z" fill="#F27D26"/>
+</svg>

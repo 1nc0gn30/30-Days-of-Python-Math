@@ -3,25 +3,123 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>30 Days of Python Math - Learn Math through Programming</title>
-    <meta name="description" content="A comprehensive 30-day curriculum to learn high school and college-level math using Python. Includes interactive coding challenges and AI-powered feedback." />
-    <meta name="keywords" content="python, math, coding challenges, learn math, python programming, data science, coding education" />
-    <meta name="author" content="Neal Frazier" />
-    
-    <!-- Open Graph / Facebook -->
+    <title>30 Days of Python Math — Interactive Curriculum &amp; Visual Sandbox</title>
+    <meta
+      name="description"
+      content="Free, open-access 30-day curriculum teaching algebra, geometry, trigonometry, statistics, linear algebra, and calculus through Python code, interactive canvas visualizers, and local verification."
+    />
+    <meta
+      name="keywords"
+      content="python math, learn math with python, interactive math visualizer, calculus in python, linear algebra python, statistics python, free coding curriculum"
+    />
+    <meta name="author" content="Neal Frazier (Neal Frazier Tech)" />
+    <meta name="theme-color" content="#07090D" />
+
+    <link rel="canonical" href="https://python-math.nealfrazier.tech/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- Open Graph -->
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://python-math.nealfrazier.tech/" />
-    <meta property="og:title" content="30 Days of Python Math" />
-    <meta property="og:description" content="Learn math through Python with daily interactive lessons and challenges." />
-    <meta property="og:image" content="https://picsum.photos/seed/math/1200/630" />
+    <meta property="og:title" content="30 Days of Python Math — Interactive Curriculum &amp; Visual Sandbox" />
+    <meta
+      property="og:description"
+      content="Master 30 days of practical mathematics with an in-browser Python math sandbox, live function/vector/geometry/stats visualizers, and 60 concept quizzes."
+    />
+    <meta property="og:image" content="https://python-math.nealfrazier.tech/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="30 Days of Python Math coordinate grid preview with function curve and Python sandbox" />
 
     <!-- Twitter -->
-    <meta property="twitter:card" content="summary_large_image" />
-    <meta property="twitter:url" content="https://python-math.nealfrazier.tech/" />
-    <meta property="twitter:title" content="30 Days of Python Math" />
-    <meta property="twitter:description" content="Learn math through Python with daily interactive lessons and challenges." />
-    
-    <link rel="canonical" href="https://python-math.nealfrazier.tech/" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@1nc0gn30" />
+    <meta name="twitter:creator" content="@1nc0gn30" />
+    <meta name="twitter:url" content="https://python-math.nealfrazier.tech/" />
+    <meta name="twitter:title" content="30 Days of Python Math — Interactive Curriculum &amp; Visual Sandbox" />
+    <meta
+      name="twitter:description"
+      content="Free 30-day Python math curriculum with instant in-browser code execution, canvas visualizers, and local progress tracking."
+    />
+    <meta name="twitter:image" content="https://python-math.nealfrazier.tech/og-image.png" />
+
+    <!-- Structured Data (SEO & AEO) -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebApplication",
+            "name": "30 Days of Python Math",
+            "url": "https://python-math.nealfrazier.tech/",
+            "applicationCategory": "EducationalApplication",
+            "operatingSystem": "Any (Web Browser)",
+            "browserRequirements": "Requires JavaScript and HTML5 Canvas",
+            "description": "An interactive 30-day Python mathematics curriculum featuring a deterministic client-side Python math sandbox, live canvas visualizers for functions, vectors, geometry, and statistics, plus 60 concept check questions.",
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            },
+            "creator": {
+              "@type": "Person",
+              "name": "Neal Frazier",
+              "affiliation": {
+                "@type": "Organization",
+                "name": "Neal Frazier Tech",
+                "url": "https://nullai.tech"
+              },
+              "sameAs": "https://github.com/1nc0gn30"
+            }
+          },
+          {
+            "@type": "Course",
+            "name": "30 Days of Python Math",
+            "description": "A 30-day self-paced course covering arithmetic, algebra, functions, geometry, trigonometry, statistics, probability, vectors, matrices, limits, derivatives, and numerical integration in Python.",
+            "url": "https://python-math.nealfrazier.tech/",
+            "provider": {
+              "@type": "Organization",
+              "name": "Neal Frazier Tech",
+              "sameAs": "https://github.com/1nc0gn30/30-Days-of-Python-Math"
+            },
+            "isAccessibleForFree": true,
+            "numberOfCredits": 0
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "What does 30 Days of Python Math teach?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "The 30-day curriculum covers four structured phases: Foundations & Algebra (Days 1–7), Sequences, Geometry & Trigonometry (Days 8–16), Statistics, Probability & Linear Algebra (Days 17–25), and Calculus & Capstone (Days 26–30), each with runnable Python examples, verified coding challenges, interactive canvas visualizers, and concept quizzes."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Does it require an API key, account, or backend server?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. All Python math execution, challenge verification, interactive visualizations, and progress storage run 100% locally in your browser using deterministic client-side engines and localStorage. No code or personal data is sent to external servers."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Is 30 Days of Python Math free to use?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Yes. Every lesson, sandbox feature, visualizer mode, solution, and quiz is 100% free and unlocked with zero paywalls. Learners who want to support ongoing open educational tools can optionally contribute via Stripe Buy Us a Coffee or Solana."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,517 +1,672 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { curriculum } from './data/curriculum';
-import { getFallbackLesson } from './data/fallbackLessons';
-import { fetchDailyLesson, evaluateUserCode } from './lib/gemini';
+import React, { useEffect, useMemo, useState } from 'react';
+import { curriculum, getLessonByDay, type CurriculumPhase } from './data/curriculum';
+import { runPythonMath, verifyChallenge, type VerificationResult } from './lib/pythonMathEngine';
 import { CodeEditor } from './components/CodeEditor';
-import { CheckCircle2, Circle, Play, Loader2, BookOpen, AlertCircle, Menu, X, ExternalLink, Settings, Terminal } from 'lucide-react';
+import { MathVisualizer } from './components/MathVisualizer';
+import { QuizPanel } from './components/QuizPanel';
+import {
+  BookOpen,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Circle,
+  Coffee,
+  Copy,
+  Check,
+  ExternalLink,
+  Eye,
+  Lightbulb,
+  Menu,
+  Play,
+  RotateCcw,
+  Search,
+  Sigma,
+  Terminal,
+  X
+} from 'lucide-react';
 
-interface LessonData {
-  explanation: string;
-  codeExample: string;
-  challengeTask: string;
-  resources: { title: string; url: string }[];
-}
+const COMPLETED_KEY = 'pythonMathCompletedDays_v2';
+const QUIZ_KEY = 'pythonMathQuizAnswers_v2';
+const CODE_DRAFT_PREFIX = 'pythonMathDraftDay_';
+const STRIPE_COFFEE_URL = 'https://buy.stripe.com/3cIfZg27PdKo2D64Ocfw40X';
+const SOLANA_TIP_ADDRESS = 'GG2eQbVh8ut1BK6j1A2tz7pSySdLpD38BgyEhGcxdXoK';
 
-interface AppSettings {
-  aiEnabled: boolean;
-  apiKey: string;
-}
+const PHASES: ('All' | CurriculumPhase)[] = [
+  'All',
+  'Foundations',
+  'Geometry & Trig',
+  'Stats & Linear Algebra',
+  'Calculus & Capstone'
+];
 
-type PyodideLike = {
-  globals: {
-    set: (name: string, value: unknown) => void;
-  };
-  runPythonAsync: (code: string) => Promise<unknown>;
-};
-
-declare global {
-  interface Window {
-    loadPyodide?: (opts?: { indexURL?: string }) => Promise<PyodideLike>;
+function safeReadJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
   }
 }
 
-const SETTINGS_STORAGE_KEY = 'pythonMathSettings';
-
 export default function App() {
-  const [selectedDay, setSelectedDay] = useState(1);
-  const [completedDays, setCompletedDays] = useState<number[]>([]);
-  const [lessonData, setLessonData] = useState<LessonData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [userCode, setUserCode] = useState('');
-  const [evaluating, setEvaluating] = useState(false);
-  const [feedback, setFeedback] = useState<{ passed: boolean; message: string } | null>(null);
+  const [selectedDay, setSelectedDay] = useState<number>(1);
+  const [phaseFilter, setPhaseFilter] = useState<'All' | CurriculumPhase>('All');
+  const [searchQuery, setSearchQuery] = useState('');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [settings, setSettings] = useState<AppSettings>({ aiEnabled: false, apiKey: '' });
-  const [pythonOutput, setPythonOutput] = useState('Python terminal ready. Click "Run Python".');
-  const [runningPython, setRunningPython] = useState(false);
-  const [pythonReady, setPythonReady] = useState(false);
-  const pyodideRef = useRef<PyodideLike | null>(null);
-  const pyodideInitRef = useRef<Promise<PyodideLike> | null>(null);
 
-  const aiReady = settings.aiEnabled && settings.apiKey.trim().length > 0;
+  const [completedDays, setCompletedDays] = useState<number[]>(() => {
+    const v2 = safeReadJson<number[]>(COMPLETED_KEY, []);
+    if (v2.length > 0) return v2;
+    return safeReadJson<number[]>('completedMathDays', []);
+  });
 
-  // Load completed days and local settings
+  const [quizAnswers, setQuizAnswers] = useState<Record<string, number>>(() =>
+    safeReadJson<Record<string, number>>(QUIZ_KEY, {})
+  );
+
+  const lesson = useMemo(() => getLessonByDay(selectedDay), [selectedDay]);
+
+  const [userCode, setUserCode] = useState<string>(() => {
+    const draft = typeof localStorage !== 'undefined' ? localStorage.getItem(`${CODE_DRAFT_PREFIX}1`) : null;
+    return draft ?? getLessonByDay(1).codeExample;
+  });
+
+  const [runOutput, setRunOutput] = useState<string>('');
+  const [runError, setRunError] = useState<boolean>(false);
+  const [runMs, setRunMs] = useState<number | null>(null);
+  const [verification, setVerification] = useState<VerificationResult | null>(null);
+  const [showHint, setShowHint] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedSol, setCopiedSol] = useState(false);
+
+  // Run starter code cleanly on day change
   useEffect(() => {
-    const savedCompleted = localStorage.getItem('completedMathDays');
-    if (savedCompleted) {
-      setCompletedDays(JSON.parse(savedCompleted));
-    }
+    const savedDraft = localStorage.getItem(`${CODE_DRAFT_PREFIX}${lesson.day}`);
+    const initialCode = savedDraft ?? lesson.codeExample;
+    setUserCode(initialCode);
+    setVerification(null);
+    setShowHint(false);
 
-    const savedSettings = localStorage.getItem(SETTINGS_STORAGE_KEY);
-    if (savedSettings) {
-      try {
-        const parsed = JSON.parse(savedSettings) as Partial<AppSettings>;
-        setSettings({
-          aiEnabled: Boolean(parsed.aiEnabled),
-          apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : ''
-        });
-      } catch {
-        // Ignore corrupted settings and keep defaults
-      }
-    }
-  }, []);
+    const preview = runPythonMath(initialCode);
+    setRunOutput(preview.output);
+    setRunError(!preview.ok);
+    setRunMs(preview.durationMs);
+  }, [lesson]);
 
-  const updateSettings = (next: AppSettings) => {
-    setSettings(next);
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(next));
-  };
-
-  const saveCompleted = (day: number) => {
-    const next = [...new Set([...completedDays, day])];
-    setCompletedDays(next);
-    localStorage.setItem('completedMathDays', JSON.stringify(next));
-  };
-
-  const getPyodide = async (): Promise<PyodideLike> => {
-    if (pyodideRef.current) {
-      return pyodideRef.current;
-    }
-
-    if (!pyodideInitRef.current) {
-      pyodideInitRef.current = (async () => {
-        if (!window.loadPyodide) {
-          await new Promise<void>((resolve, reject) => {
-            const script = document.createElement('script');
-            script.src = 'https://cdn.jsdelivr.net/pyodide/v0.27.5/full/pyodide.js';
-            script.async = true;
-            script.onload = () => resolve();
-            script.onerror = () => reject(new Error('Failed to load Python runtime'));
-            document.head.appendChild(script);
-          });
-        }
-
-        if (!window.loadPyodide) {
-          throw new Error('Python runtime is unavailable');
-        }
-
-        const runtime = await window.loadPyodide({
-          indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.27.5/full/'
-        });
-
-        pyodideRef.current = runtime;
-        setPythonReady(true);
-        return runtime;
-      })();
-    }
-
-    return pyodideInitRef.current;
-  };
-
-  const runPython = async () => {
-    setRunningPython(true);
-    setPythonOutput('Running...');
-
+  const handleCodeChange = (nextCode: string) => {
+    setUserCode(nextCode);
     try {
-      const pyodide = await getPyodide();
-      pyodide.globals.set('user_code', userCode);
-      const output = await pyodide.runPythonAsync(`
-import io
-import traceback
-import contextlib
-
-_stdout = io.StringIO()
-_stderr = io.StringIO()
-
-with contextlib.redirect_stdout(_stdout), contextlib.redirect_stderr(_stderr):
-    try:
-        exec(user_code, {})
-    except Exception:
-        traceback.print_exc()
-
-result = (_stdout.getvalue() + _stderr.getvalue()).strip()
-result if result else "Code ran successfully (no output)."
-      `);
-
-      setPythonOutput(String(output));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown Python runtime error';
-      setPythonOutput(`Runtime error: ${message}`);
-    } finally {
-      setRunningPython(false);
+      localStorage.setItem(`${CODE_DRAFT_PREFIX}${lesson.day}`, nextCode);
+    } catch {
+      // Ignore storage quota issues
     }
   };
 
-  const loadLesson = async (dayInt: number) => {
-    setSelectedDay(dayInt);
-    setLessonData(null);
-    setFeedback(null);
-    setLoading(true);
-    setUserCode('# Write your python code here\n');
+  const handleSelectDay = (day: number) => {
+    setSelectedDay(day);
     setIsSidebarOpen(false);
-
-    const item = curriculum.find(d => d.day === dayInt);
-    if (!item) {
-      setLoading(false);
-      return;
-    }
-
-    if (aiReady) {
-      const data = await fetchDailyLesson(item.day, item.title, item.topic, settings.apiKey.trim());
-      const nextLesson = data ?? getFallbackLesson(item.day, item.title, item.topic);
-      setLessonData(nextLesson);
-      setUserCode(nextLesson.codeExample || '# Write your python code here\n');
-    } else {
-      const nextLesson = getFallbackLesson(item.day, item.title, item.topic);
-      setLessonData(nextLesson);
-      setUserCode(nextLesson.codeExample || '# Write your python code here\n');
-    }
-
-    setLoading(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Initial load
-  useEffect(() => {
-    loadLesson(1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiReady]);
+  const handleRunPython = () => {
+    const result = runPythonMath(userCode);
+    setRunOutput(result.output);
+    setRunError(!result.ok);
+    setRunMs(result.durationMs);
+  };
 
-  const handleEvaluate = async () => {
-    const item = curriculum.find(d => d.day === selectedDay);
-    if (!item || !lessonData || !aiReady) return;
+  const handleCheckChallenge = () => {
+    const result = runPythonMath(userCode);
+    setRunOutput(result.output);
+    setRunError(!result.ok);
+    setRunMs(result.durationMs);
 
-    setEvaluating(true);
-    setFeedback(null);
+    const verdict = verifyChallenge(userCode, result, lesson.checkRule);
+    setVerification(verdict);
 
-    const result = await evaluateUserCode(
-      item.day,
-      item.topic,
-      lessonData.challengeTask,
-      userCode,
-      settings.apiKey.trim()
-    );
+    if (verdict.passed) {
+      setCompletedDays(prev => {
+        const next = Array.from(new Set([...prev, lesson.day])).sort((a, b) => a - b);
+        localStorage.setItem(COMPLETED_KEY, JSON.stringify(next));
+        return next;
+      });
+    }
+  };
 
-    setFeedback({
-      passed: result.passed,
-      message: result.feedback
+  const handleResetStarter = () => {
+    handleCodeChange(lesson.codeExample);
+    setVerification(null);
+    const result = runPythonMath(lesson.codeExample);
+    setRunOutput(result.output);
+    setRunError(!result.ok);
+    setRunMs(result.durationMs);
+  };
+
+  const handleLoadSolution = () => {
+    handleCodeChange(lesson.solutionCode);
+    const result = runPythonMath(lesson.solutionCode);
+    setRunOutput(result.output);
+    setRunError(!result.ok);
+    setRunMs(result.durationMs);
+  };
+
+  const handleSelectQuizAnswer = (key: string, optionIndex: number) => {
+    setQuizAnswers(prev => {
+      const next = { ...prev, [key]: optionIndex };
+      localStorage.setItem(QUIZ_KEY, JSON.stringify(next));
+      return next;
     });
-
-    if (result.passed) {
-      saveCompleted(item.day);
-    }
-    setEvaluating(false);
   };
+
+  const handleCopyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(userCode);
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 1600);
+    } catch {
+      // Ignore clipboard failures in restricted environments
+    }
+  };
+
+  const handleCopySolana = async () => {
+    try {
+      await navigator.clipboard.writeText(SOLANA_TIP_ADDRESS);
+      setCopiedSol(true);
+      setTimeout(() => setCopiedSol(false), 1800);
+    } catch {
+      // Ignore clipboard failures
+    }
+  };
+
+  const filteredCurriculum = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return curriculum.filter(item => {
+      if (phaseFilter !== 'All' && item.phase !== phaseFilter) return false;
+      if (!q) return true;
+      return (
+        item.title.toLowerCase().includes(q) ||
+        item.topic.toLowerCase().includes(q) ||
+        `day ${item.day}`.includes(q)
+      );
+    });
+  }, [phaseFilter, searchQuery]);
+
+  const totalQuizCorrect = useMemo(() => {
+    let score = 0;
+    for (const d of curriculum) {
+      d.quiz.forEach((q, idx) => {
+        if (quizAnswers[`${d.day}-${idx}`] === q.correctIndex) score++;
+      });
+    }
+    return score;
+  }, [quizAnswers]);
+
+  const completionPct = Math.round((completedDays.length / curriculum.length) * 100);
 
   return (
-    <div className="flex flex-col md:flex-row h-screen bg-[#050505] text-[#E4E3E0] font-sans antialiased overflow-hidden">
-      {/* Mobile Header */}
-      <header className="md:hidden flex items-center justify-between p-4 border-b border-white/10 bg-[#0A0A0A] z-50">
-        <h1 className="text-lg font-medium tracking-tight text-white">30 Days of Python Math</h1>
+    <div className="min-h-screen bg-[#07090D] text-[#E8E6E1] font-sans antialiased flex flex-col lg:flex-row">
+      {/* Mobile / Tablet Sticky Header */}
+      <header className="lg:hidden sticky top-0 z-40 flex items-center justify-between px-4 py-3 border-b border-white/10 bg-[#0B0E14]/95 backdrop-blur">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-8 h-8 rounded-lg bg-[#F27D26]/15 border border-[#F27D26]/40 flex items-center justify-center shrink-0">
+            <Sigma className="w-4 h-4 text-[#F27D26]" aria-hidden="true" />
+          </div>
+          <div className="truncate">
+            <div className="font-display text-sm font-semibold tracking-tight text-white truncate">
+              30 Days of Python Math
+            </div>
+            <div className="text-[11px] font-mono text-white/55">
+              Day {lesson.day}/30 · {completedDays.length} solved
+            </div>
+          </div>
+        </div>
         <button
-          onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-          className="p-2 hover:bg-white/5 rounded-lg"
+          type="button"
+          onClick={() => setIsSidebarOpen(o => !o)}
+          aria-label={isSidebarOpen ? 'Close curriculum menu' : 'Open curriculum menu'}
+          aria-expanded={isSidebarOpen}
+          className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 text-white"
         >
-          {isSidebarOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+          {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
         </button>
       </header>
 
-      {/* Sidebar Navigation */}
-      <aside className={`
-        fixed inset-0 z-40 md:relative md:z-0 md:w-80 border-r border-white/10 flex flex-col h-full bg-[#0A0A0A] transition-transform duration-300
-        ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
-      `}>
-        <div className="hidden md:block p-6 border-b border-white/10 shrink-0">
-          <h1 className="text-xl font-medium tracking-tight text-white mb-2">30 Days of Python Math</h1>
-          <div className="flex items-center space-x-2 text-xs font-mono text-white/50 uppercase tracking-wider">
-            <span>Progress: {completedDays.length}/30</span>
-            <div className="h-1 flex-1 bg-white/10 rounded-full overflow-hidden">
+      {/* Mobile Drawer Backdrop */}
+      {isSidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 z-40 lg:hidden"
+          onClick={() => setIsSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Sidebar Curriculum Navigator */}
+      <aside
+        aria-label="30-day curriculum navigation"
+        className={`fixed inset-y-0 left-0 z-50 w-[300px] max-w-[85vw] lg:sticky lg:top-0 lg:h-screen lg:w-80 lg:z-10 border-r border-white/10 bg-[#0B0E14] flex flex-col transition-transform duration-200 ${
+          isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+        }`}
+      >
+        <div className="p-5 border-b border-white/10 shrink-0 space-y-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-lg bg-[#F27D26]/15 border border-[#F27D26]/40 flex items-center justify-center shrink-0">
+                <Sigma className="w-5 h-5 text-[#F27D26]" aria-hidden="true" />
+              </div>
+              <div>
+                <h1 className="font-display text-base font-semibold tracking-tight text-white leading-tight">
+                  30 Days of Python Math
+                </h1>
+                <p className="text-[11px] font-mono text-white/50 uppercase tracking-wider">
+                  Open Curriculum · v2.0
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsSidebarOpen(false)}
+              aria-label="Close sidebar"
+              className="lg:hidden min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg hover:bg-white/10 text-white/70"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Progress Readout */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs font-mono text-white/65">
+              <span>Challenges: {completedDays.length}/30</span>
+              <span className="text-[#F27D26]">{completionPct}%</span>
+            </div>
+            <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
               <div
-                className="h-full bg-[#F27D26] transition-all duration-500 ease-out"
-                style={{ width: `${(completedDays.length / 30) * 100}%` }}
+                className="h-full bg-[#F27D26] transition-all duration-300"
+                style={{ width: `${completionPct}%` }}
               />
+            </div>
+            <div className="text-[11px] font-mono text-white/45 flex items-center justify-between">
+              <span>Quiz checks: {totalQuizCorrect}/60</span>
+              <span className="text-emerald-400">100% Free & Local</span>
+            </div>
+          </div>
+
+          {/* Search & Phase Filter */}
+          <div className="space-y-2">
+            <label className="relative block">
+              <Search className="w-3.5 h-3.5 text-white/40 absolute left-3 top-1/2 -translate-y-1/2" aria-hidden="true" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Search day or math topic..."
+                aria-label="Search curriculum lessons"
+                className="w-full pl-8 pr-3 py-2 rounded-lg bg-[#07090D] border border-white/10 text-xs text-white placeholder:text-white/35 focus:outline-none focus:border-[#F27D26]"
+              />
+            </label>
+            <div className="flex flex-wrap gap-1">
+              {PHASES.map(phase => (
+                <button
+                  key={phase}
+                  type="button"
+                  onClick={() => setPhaseFilter(phase)}
+                  className={`px-2 py-1 rounded text-[10px] font-mono transition-colors ${
+                    phaseFilter === phase
+                      ? 'bg-[#F27D26] text-[#07090D] font-semibold'
+                      : 'bg-white/5 text-white/60 hover:text-white'
+                  }`}
+                >
+                  {phase === 'Stats & Linear Algebra' ? 'Stats & LinAlg' : phase === 'Calculus & Capstone' ? 'Calculus' : phase}
+                </button>
+              ))}
             </div>
           </div>
         </div>
 
-        <div className="md:hidden p-6 border-b border-white/10">
-          <h2 className="text-sm font-mono uppercase tracking-widest text-[#F27D26] mb-4">Curriculum</h2>
-        </div>
-
-        <div className="p-4 border-b border-white/10">
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="w-full flex items-center justify-between p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
-          >
-            <div className="flex items-center gap-2 text-sm text-white/90">
-              <Settings className="w-4 h-4" />
-              <span>Settings</span>
-            </div>
-            <span className={`text-xs font-mono uppercase ${aiReady ? 'text-green-400' : 'text-white/50'}`}>
-              {aiReady ? 'AI On' : 'AI Off'}
-            </span>
-          </button>
-
-          {showSettings && (
-            <div className="mt-3 p-3 rounded-lg bg-[#111111] border border-white/10 space-y-3">
-              <label className="flex items-center justify-between text-xs font-mono uppercase tracking-wide text-white/70">
-                <span>Use AI</span>
-                <input
-                  type="checkbox"
-                  checked={settings.aiEnabled}
-                  onChange={(e) => updateSettings({ ...settings, aiEnabled: e.target.checked })}
-                  className="accent-[#F27D26]"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-mono uppercase tracking-wide text-white/70">Gemini API Key</span>
-                <input
-                  type="password"
-                  value={settings.apiKey}
-                  placeholder="Paste key (stored locally in this browser)"
-                  onChange={(e) => updateSettings({ ...settings, apiKey: e.target.value })}
-                  className="mt-2 w-full rounded-md bg-black/40 border border-white/15 px-3 py-2 text-xs text-white placeholder:text-white/35 focus:outline-none focus:ring-1 focus:ring-[#F27D26]"
-                />
-              </label>
-
-              <p className="text-[11px] text-white/45 leading-relaxed">
-                AI features only run when enabled and a key is provided.
-              </p>
-            </div>
-          )}
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4 space-y-1">
-          {curriculum.map((item) => {
-            const isActive = selectedDay === item.day;
-            const isCompleted = completedDays.includes(item.day);
+        {/* 30-Day List */}
+        <nav className="flex-1 overflow-y-auto p-3 space-y-1">
+          {filteredCurriculum.map(item => {
+            const active = item.day === selectedDay;
+            const done = completedDays.includes(item.day);
             return (
               <button
                 key={item.day}
-                onClick={() => loadLesson(item.day)}
-                className={`w-full flex items-center text-left p-3 rounded-lg transition-colors
-                  ${isActive ? 'bg-[#1A1A1A] text-white' : 'hover:bg-white/5 text-white/70'}
-                `}
+                type="button"
+                onClick={() => handleSelectDay(item.day)}
+                className={`w-full flex items-center gap-3 text-left px-3 py-2.5 min-h-[44px] rounded-lg border transition-colors ${
+                  active
+                    ? 'bg-[#161B25] border-[#F27D26]/40 text-white'
+                    : 'border-transparent hover:bg-white/5 text-white/70 hover:text-white'
+                }`}
               >
-                <div className="shrink-0 mr-3">
-                  {isCompleted ? (
-                    <CheckCircle2 className="w-4 h-4 text-[#F27D26]" />
+                <span className="shrink-0">
+                  {done ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" aria-label="Completed" />
                   ) : (
-                    <Circle className="w-4 h-4 text-white/20" />
+                    <Circle className={`w-4 h-4 ${active ? 'text-[#F27D26]' : 'text-white/25'}`} aria-hidden="true" />
                   )}
-                </div>
-                <div className="truncate flex-1">
-                  <div className="text-sm font-medium">Day {item.day}: {item.title}</div>
-                  <div className="text-xs text-white/40 truncate">{item.topic}</div>
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-medium truncate">
+                    <span className="font-mono text-white/45 mr-1.5">{String(item.day).padStart(2, '0')}</span>
+                    {item.title}
+                  </div>
+                  <div className="text-[11px] text-white/45 truncate">{item.topic}</div>
                 </div>
               </button>
             );
           })}
-        </div>
+          {filteredCurriculum.length === 0 && (
+            <p className="text-xs text-white/45 p-3 font-mono">No lessons match “{searchQuery}”.</p>
+          )}
+        </nav>
       </aside>
 
-      {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto scroll-smooth relative flex flex-col">
-        {loading ? (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}>
-              <Loader2 className="w-8 h-8 text-[#F27D26]" />
-            </motion.div>
-          </div>
-        ) : (
-          <AnimatePresence mode="wait">
-            {lessonData && (
-              <motion.div
-                key={selectedDay}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                transition={{ duration: 0.3 }}
-                className="p-6 md:p-10 max-w-6xl mx-auto w-full pb-24"
+      {/* Main Content Workspace */}
+      <main className="flex-1 min-w-0 flex flex-col coord-grid">
+        <div className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-10 py-6 lg:py-8 space-y-6">
+          {/* Top Lesson Header */}
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 border-b border-white/10 pb-5">
+            <div className="space-y-2 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono uppercase tracking-[0.2em]">
+                <span className="text-[#F27D26]">
+                  Day {String(lesson.day).padStart(2, '0')} / 30
+                </span>
+                <span className="text-white/25">·</span>
+                <span className="text-white/55">{lesson.phase}</span>
+                {completedDays.includes(lesson.day) && (
+                  <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 tracking-normal">
+                    Solved
+                  </span>
+                )}
+              </div>
+              <h2 className="font-display text-2xl sm:text-3xl font-semibold tracking-tight text-white">
+                {lesson.title}
+              </h2>
+              <p className="text-sm text-white/65 max-w-[65ch]">{lesson.topic}</p>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                disabled={selectedDay <= 1}
+                onClick={() => handleSelectDay(selectedDay - 1)}
+                className="inline-flex items-center gap-1 px-3 py-2 min-h-[44px] rounded-lg border border-white/10 bg-[#0E1117] text-xs font-mono text-white/80 hover:bg-white/10 disabled:opacity-35 disabled:cursor-not-allowed"
               >
-                <div className="mb-2 text-xs font-mono uppercase tracking-widest text-[#F27D26]">
-                  Day {selectedDay} • {curriculum.find(d => d.day === selectedDay)?.title}
+                <ChevronLeft className="w-4 h-4" aria-hidden="true" />
+                <span>Prev</span>
+              </button>
+              <button
+                type="button"
+                disabled={selectedDay >= 30}
+                onClick={() => handleSelectDay(selectedDay + 1)}
+                className="inline-flex items-center gap-1 px-3 py-2 min-h-[44px] rounded-lg border border-white/10 bg-[#0E1117] text-xs font-mono text-white/80 hover:bg-white/10 disabled:opacity-35 disabled:cursor-not-allowed"
+              >
+                <span>Next</span>
+                <ChevronRight className="w-4 h-4" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+
+          {/* Core Formula Strip */}
+          <div className="rounded-xl border border-[#F27D26]/25 bg-[#0E1117] px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <span className="text-[11px] font-mono uppercase tracking-[0.2em] text-[#F27D26] shrink-0">
+              Key Formula
+            </span>
+            <code className="text-xs sm:text-sm font-mono text-white overflow-x-auto">
+              {lesson.formula}
+            </code>
+          </div>
+
+          {/* 2-Column Main Grid */}
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+            {/* Left Column: Concept + Visualizer + Quiz + Resources */}
+            <div className="xl:col-span-6 space-y-6 min-w-0">
+              <section className="rounded-xl border border-white/10 bg-[#0E1117] p-5 space-y-4">
+                <div className="flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-[#F27D26]" aria-hidden="true" />
+                  <h3 className="text-xs font-mono uppercase tracking-[0.2em] text-white/80">
+                    Mathematical Concept
+                  </h3>
+                </div>
+                <p className="text-sm leading-relaxed text-white/80 max-w-[68ch]">
+                  {lesson.explanation}
+                </p>
+                <ul className="space-y-1.5 pt-2 border-t border-white/10">
+                  {lesson.keyTakeaways.map((point, idx) => (
+                    <li key={idx} className="text-xs text-white/70 flex items-start gap-2">
+                      <span className="text-[#F27D26] font-mono mt-0.5">›</span>
+                      <span>{point}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+
+              <MathVisualizer preset={lesson.visualizer} day={lesson.day} />
+
+              <QuizPanel
+                day={lesson.day}
+                questions={lesson.quiz}
+                answers={quizAnswers}
+                onSelectAnswer={handleSelectQuizAnswer}
+              />
+
+              <section className="rounded-xl border border-white/10 bg-[#0E1117] p-5 space-y-3">
+                <h3 className="text-xs font-mono uppercase tracking-[0.2em] text-white/60">
+                  Reference Documentation
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {lesson.resources.map((res, idx) => (
+                    <a
+                      key={idx}
+                      href={res.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-between gap-2 px-3.5 py-2.5 min-h-[44px] rounded-lg bg-[#141923] hover:bg-[#1A2130] border border-white/10 transition-colors group"
+                    >
+                      <span className="text-xs font-medium text-white/85 group-hover:text-white truncate">
+                        {res.title}
+                      </span>
+                      <ExternalLink className="w-3.5 h-3.5 text-white/40 group-hover:text-[#F27D26] shrink-0" aria-hidden="true" />
+                    </a>
+                  ))}
+                </div>
+              </section>
+            </div>
+
+            {/* Right Column: Challenge + Interactive Python Sandbox + Verifier */}
+            <div className="xl:col-span-6 space-y-5 min-w-0">
+              <section className="rounded-xl border border-[#F27D26]/35 bg-[#F27D26]/[0.07] p-5 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-mono uppercase tracking-[0.2em] text-[#F27D26]">
+                    Day {lesson.day} Coding Challenge
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setShowHint(h => !h)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-[11px] font-mono text-white/80"
+                    >
+                      <Lightbulb className="w-3.5 h-3.5 text-[#F27D26]" aria-hidden="true" />
+                      <span>{showHint ? 'Hide Hint' : 'Hint'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleLoadSolution}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-[11px] font-mono text-white/80"
+                    >
+                      <Eye className="w-3.5 h-3.5 text-[#38BDF8]" aria-hidden="true" />
+                      <span>Load Solution</span>
+                    </button>
+                  </div>
+                </div>
+                <p className="text-sm leading-relaxed text-white font-medium">
+                  {lesson.challengeTask}
+                </p>
+                {showHint && (
+                  <p className="text-xs font-mono text-amber-200/90 bg-black/30 border border-[#F27D26]/25 rounded-lg p-3">
+                    Hint: {lesson.hint}
+                  </p>
+                )}
+              </section>
+
+              {/* Python Sandbox */}
+              <section className="rounded-xl border border-white/10 bg-[#0E1117] p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Terminal className="w-4 h-4 text-[#F27D26]" aria-hidden="true" />
+                    <h3 className="text-xs font-mono uppercase tracking-[0.2em] text-white/80">
+                      Python Math Sandbox
+                    </h3>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCopyCode}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 min-h-[38px] rounded-lg bg-white/5 hover:bg-white/10 text-xs font-mono text-white/75"
+                      title="Copy code"
+                    >
+                      {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedCode ? 'Copied' : 'Copy'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetStarter}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 min-h-[38px] rounded-lg bg-white/5 hover:bg-white/10 text-xs font-mono text-white/75"
+                      title="Reset to example code"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>Reset</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRunPython}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 min-h-[38px] rounded-lg bg-[#1C2433] hover:bg-[#253045] border border-white/15 text-xs font-mono text-white font-medium"
+                    >
+                      <Play className="w-3.5 h-3.5 text-[#38BDF8]" aria-hidden="true" />
+                      <span>Run</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCheckChallenge}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 min-h-[38px] rounded-lg bg-[#F27D26] hover:bg-[#ff8f3a] text-xs font-mono text-[#07090D] font-semibold"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>Verify Solution</span>
+                    </button>
+                  </div>
                 </div>
 
-                <h2 className="text-2xl md:text-3xl font-medium tracking-tight text-white mb-6">
-                  {curriculum.find(d => d.day === selectedDay)?.topic}
-                </h2>
+                <CodeEditor code={userCode} onChange={handleCodeChange} />
 
-                {!aiReady && (
-                  <div className="mb-6 p-4 rounded-lg border border-yellow-500/30 bg-yellow-500/10 text-yellow-200 text-sm">
-                    AI is currently disabled. Open Settings to enable AI and add your API key.
+                {/* Instant Console Output */}
+                <div className="rounded-lg border border-white/10 bg-[#07090D] overflow-hidden">
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-white/10 bg-[#0B0E14] text-[11px] font-mono">
+                    <span className="text-white/60 uppercase tracking-wider">Output Console</span>
+                    <span className={runError ? 'text-red-400' : 'text-emerald-400'}>
+                      {runError ? 'Error' : `Executed in ${runMs ?? 0.2} ms (local)`}
+                    </span>
+                  </div>
+                  <pre
+                    className={`p-3.5 text-xs font-mono whitespace-pre-wrap break-words min-h-[110px] max-h-[260px] overflow-auto ${
+                      runError ? 'text-red-300' : 'text-[#C8D3E1]'
+                    }`}
+                  >
+                    {runOutput || 'Click "Run" to execute Python math code locally.'}
+                  </pre>
+                </div>
+
+                {/* Deterministic Verification Breakdown */}
+                {verification && (
+                  <div
+                    role="status"
+                    className={`rounded-xl border p-4 space-y-2.5 ${
+                      verification.passed
+                        ? 'bg-emerald-500/10 border-emerald-500/35'
+                        : 'bg-amber-500/10 border-amber-500/35'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <h4
+                        className={`text-xs font-mono uppercase tracking-wider font-semibold ${
+                          verification.passed ? 'text-emerald-300' : 'text-amber-300'
+                        }`}
+                      >
+                        {verification.passed ? 'Challenge Passed' : 'Verification Checklist'}
+                      </h4>
+                      <span className="text-[11px] font-mono text-white/60">
+                        {verification.checks.filter(c => c.passed).length}/{verification.checks.length} checks
+                      </span>
+                    </div>
+                    <p className="text-xs text-white/85">{verification.feedback}</p>
+                    <ul className="space-y-1 pt-1">
+                      {verification.checks.map((chk, idx) => (
+                        <li key={idx} className="text-xs font-mono flex items-center gap-2">
+                          <span className={chk.passed ? 'text-emerald-400' : 'text-amber-400'}>
+                            {chk.passed ? '✓' : '×'}
+                          </span>
+                          <span className={chk.passed ? 'text-white/80' : 'text-white/65'}>{chk.label}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
+              </section>
+            </div>
+          </div>
+        </div>
 
-                <div className="flex flex-col lg:grid lg:grid-cols-12 gap-8">
-                  {/* Left: Explanation & Resources */}
-                  <div className="lg:col-span-7 space-y-8">
-                    <section className="bg-[#101010] p-6 rounded-xl border border-white/5 shadow-2xl">
-                      <div className="flex items-center space-x-2 mb-4 text-white/80">
-                        <BookOpen className="w-4 h-4" />
-                        <h3 className="text-sm font-mono uppercase tracking-wider">Concept</h3>
-                      </div>
-                      <div className="text-white/70 leading-relaxed text-sm md:text-base prose prose-invert max-w-none">
-                        {lessonData.explanation}
-                      </div>
-                    </section>
+        {/* Clean Attribution & Open Support Footer */}
+        <footer className="mt-8 border-t border-white/10 bg-[#0B0E14]/90 px-4 sm:px-6 lg:px-10 py-6">
+          <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-4 text-xs text-white/60">
+            <div className="space-y-1">
+              <p className="text-white/85 font-medium">
+                Engineered by Neal Frazier Tech (
+                <a
+                  href="https://github.com/1nc0gn30/30-Days-of-Python-Math"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[#F27D26] hover:underline"
+                >
+                  @1nc0gn30
+                </a>
+                ) •{' '}
+                <a
+                  href="https://nullai.tech"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-white/80 hover:text-white underline decoration-white/30"
+                >
+                  NullAI Platform
+                </a>
+              </p>
+              <p className="text-[11px] font-mono text-white/45">
+                100% free, open-access educational curriculum. All code execution and progress run locally in your browser.
+              </p>
+            </div>
 
-                    <section className="bg-[#151515] p-6 rounded-xl border border-white/5">
-                      <h3 className="text-xs font-mono uppercase tracking-wider text-white/40 mb-4">Supplemental Resources</h3>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {lessonData.resources.map((res, i) => (
-                          <a
-                            key={i}
-                            href={res.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center justify-between p-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 transition-colors group"
-                          >
-                            <span className="text-xs font-medium text-white/80 group-hover:text-white truncate pr-2">{res.title}</span>
-                            <ExternalLink className="w-3 h-3 text-white/40 group-hover:text-[#F27D26]" />
-                          </a>
-                        ))}
-                      </div>
-                    </section>
-
-                    <section>
-                      <h3 className="text-sm font-mono uppercase tracking-wider text-white/50 mb-3">Example Code</h3>
-                      <div className="bg-[#151515] p-5 rounded-lg border border-white/5 font-mono text-sm text-[#A9B7C6] overflow-x-auto">
-                        <pre><code>{lessonData.codeExample}</code></pre>
-                      </div>
-                    </section>
-                  </div>
-
-                  {/* Right: Challenge & Editor */}
-                  <div className="lg:col-span-5 flex flex-col space-y-6">
-                    <section className="bg-[#F27D26]/10 p-6 rounded-xl border border-[#F27D26]/20">
-                      <div className="flex items-center space-x-2 mb-3 text-[#F27D26]">
-                        <AlertCircle className="w-4 h-4" />
-                        <h3 className="text-sm font-mono uppercase tracking-wider">Today's Challenge</h3>
-                      </div>
-                      <p className="text-[#F27D26]/90 leading-relaxed font-medium text-sm md:text-base">
-                        {lessonData.challengeTask}
-                      </p>
-                    </section>
-
-                    <div className="flex flex-col space-y-4">
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-xs font-mono uppercase tracking-wider text-white/50">Your Solution</h3>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={runPython}
-                            disabled={runningPython}
-                            className={`flex items-center space-x-2 px-4 py-2 rounded-full text-xs font-mono uppercase tracking-wide transition-all
-                              ${runningPython
-                                ? 'bg-white/5 text-white/30 cursor-not-allowed'
-                                : 'bg-white/10 hover:bg-white/20 text-white'
-                              }
-                            `}
-                            title="Run in local Python terminal"
-                          >
-                            {runningPython ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <Terminal className="w-3 h-3" />
-                            )}
-                            <span>{runningPython ? 'Running...' : 'Run Python'}</span>
-                          </button>
-
-                          <button
-                            onClick={handleEvaluate}
-                            disabled={evaluating || !aiReady}
-                            className={`flex items-center space-x-2 px-4 py-2 rounded-full text-xs font-mono uppercase tracking-wide transition-all
-                              ${evaluating || !aiReady
-                                ? 'bg-white/5 text-white/30 cursor-not-allowed'
-                                : 'bg-[#F27D26] hover:bg-[#ff8a33] text-black hover:scale-105 active:scale-95'
-                              }
-                            `}
-                            title={aiReady ? 'Evaluate with AI' : 'Enable AI in Settings to evaluate'}
-                          >
-                            {evaluating ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <Play className="w-3 h-3" />
-                            )}
-                            <span>{evaluating ? 'Evaluating...' : 'Check'}</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="min-h-[250px] md:min-h-[350px]">
-                        <CodeEditor code={userCode} onChange={setUserCode} />
-                      </div>
-
-                      <section className="bg-[#0F0F0F] p-4 rounded-xl border border-white/10">
-                        <div className="flex items-center justify-between mb-3">
-                          <h4 className="text-xs font-mono uppercase tracking-wider text-white/60">Python Terminal</h4>
-                          <div className="flex items-center gap-2">
-                            <span className={`text-[10px] font-mono uppercase ${pythonReady ? 'text-green-400' : 'text-white/50'}`}>
-                              {pythonReady ? 'Runtime Ready' : 'Lazy Loaded'}
-                            </span>
-                            <button
-                              onClick={() => setPythonOutput('')}
-                              className="text-[10px] font-mono uppercase tracking-wide px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white/80"
-                            >
-                              Clear
-                            </button>
-                          </div>
-                        </div>
-                        <pre className="rounded-lg bg-black/40 border border-white/10 p-3 text-xs text-[#A9B7C6] whitespace-pre-wrap break-words min-h-[120px] max-h-[260px] overflow-auto">
-                          {pythonOutput}
-                        </pre>
-                      </section>
-
-                      {feedback && (
-                        <motion.div
-                          initial={{ opacity: 0, scale: 0.95 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          className={`p-5 rounded-xl border flex items-start space-x-4
-                            ${feedback.passed
-                              ? 'bg-green-500/10 border-green-500/30'
-                              : 'bg-red-500/10 border-red-500/30'
-                            }
-                          `}
-                        >
-                          <div className="pt-0.5 shrink-0">
-                            {feedback.passed ? (
-                              <CheckCircle2 className="w-5 h-5 text-green-400" />
-                            ) : (
-                              <AlertCircle className="w-5 h-5 text-red-400" />
-                            )}
-                          </div>
-                          <div>
-                            <h4 className={`text-sm font-bold uppercase tracking-wider mb-1
-                              ${feedback.passed ? 'text-green-400' : 'text-red-400'}
-                            `}>
-                              {feedback.passed ? 'Success!' : 'Keep Trying'}
-                            </h4>
-                            <p className={`text-sm leading-relaxed
-                              ${feedback.passed ? 'text-green-200/80' : 'text-red-200/80'}
-                            `}>
-                              {feedback.message}
-                            </p>
-                          </div>
-                        </motion.div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        )}
+            <div className="flex flex-wrap items-center gap-2.5">
+              <a
+                href={STRIPE_COFFEE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 min-h-[40px] rounded-lg bg-[#F27D26]/15 hover:bg-[#F27D26]/25 border border-[#F27D26]/40 text-xs font-mono text-[#F27D26] transition-colors"
+              >
+                <Coffee className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Buy Us a Coffee</span>
+              </a>
+              <button
+                type="button"
+                onClick={handleCopySolana}
+                className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-mono text-white/75 transition-colors"
+                title={`Copy Solana tip address: ${SOLANA_TIP_ADDRESS}`}
+              >
+                {copiedSol ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-white/50" />}
+                <span>{copiedSol ? 'Solana Copied' : `SOL: ${SOLANA_TIP_ADDRESS.slice(0, 6)}...${SOLANA_TIP_ADDRESS.slice(-4)}`}</span>
+              </button>
+            </div>
+          </div>
+        </footer>
       </main>
     </div>
   );
